@@ -8,6 +8,8 @@ import {
   Search,
   LogOut,
   Eye,
+  Upload,
+  Trash2,
 } from 'lucide-react';
 import Button from '../components/Button';
 import Card from '../components/Card';
@@ -43,6 +45,7 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
   const [filterSeverity, setFilterSeverity] = useState<string>('all');
   const [filterCategory, setFilterCategory] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [complaintView, setComplaintView] = useState<'all' | 'priority'>('all');
   const [stats, setStats] = useState({
     total: 0,
     high: 0,
@@ -54,6 +57,10 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
   >({});
   const [statusSavingId, setStatusSavingId] = useState<string | null>(null);
   const [statusErrorById, setStatusErrorById] = useState<Record<string, string>>({});
+
+  const [fileDraftById, setFileDraftById] = useState<Record<string, File | null>>({});
+  const [fileSavingId, setFileSavingId] = useState<string | null>(null);
+  const [fileErrorById, setFileErrorById] = useState<Record<string, string>>({});
 
   const statusOptions = useMemo(
     () => ['Registered', 'Under Review', 'Investigation', 'FIR Filed', 'Resolved'],
@@ -177,7 +184,7 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
 
   useEffect(() => {
     filterComplaints();
-  }, [complaints, filterSeverity, filterCategory, searchQuery]);
+  }, [complaints, filterSeverity, filterCategory, searchQuery, complaintView]);
 
   const loadComplaints = async () => {
     if (!supabase) {
@@ -187,6 +194,7 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
     const { data, error } = await supabase
       .from('complaints')
       .select('*')
+      .order('severity_score', { ascending: false })
       .order('created_at', { ascending: false });
 
     if (error) {
@@ -271,13 +279,104 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
     }
   };
 
+  const bucketName = 'complaint-files';
+
+  const extractStoragePathFromPublicUrl = (url: string): { bucket: string; path: string } | null => {
+    // Expected: https://<ref>.supabase.co/storage/v1/object/public/<bucket>/<path>
+    const m = url.match(/\/storage\/v1\/object\/public\/([^/]+)\/(.+)$/);
+    if (!m?.[1] || !m?.[2]) return null;
+    return { bucket: m[1], path: m[2] };
+  };
+
+  const handleUploadOrReplaceFile = async (complaint: Complaint) => {
+    if (!supabase) return;
+
+    const file = fileDraftById[complaint.id];
+    if (!file) return;
+
+    setFileSavingId(complaint.id);
+    setFileErrorById((prev) => ({ ...prev, [complaint.id]: '' }));
+
+    try {
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const path = `complaints/${complaint.id}/${Date.now()}_${safeName}`;
+
+      const upload = await supabase.storage.from(bucketName).upload(path, file, {
+        contentType: file.type || undefined,
+        upsert: true,
+      });
+
+      if (upload.error) {
+        setFileErrorById((prev) => ({ ...prev, [complaint.id]: upload.error?.message || 'Upload failed.' }));
+        return;
+      }
+
+      const publicUrl = supabase.storage.from(bucketName).getPublicUrl(path).data.publicUrl;
+
+      const { error: updateError } = await supabase
+        .from('complaints')
+        .update({ file_url: publicUrl })
+        .eq('id', complaint.id);
+
+      if (updateError) {
+        setFileErrorById((prev) => ({ ...prev, [complaint.id]: updateError.message }));
+        return;
+      }
+
+      setFileDraftById((prev) => ({ ...prev, [complaint.id]: null }));
+      void loadComplaints();
+    } catch {
+      setFileErrorById((prev) => ({ ...prev, [complaint.id]: 'Failed to upload file.' }));
+    } finally {
+      setFileSavingId(null);
+    }
+  };
+
+  const handleDeleteFile = async (complaint: Complaint) => {
+    if (!supabase) return;
+    if (!complaint.file_url) return;
+
+    setFileSavingId(complaint.id);
+    setFileErrorById((prev) => ({ ...prev, [complaint.id]: '' }));
+
+    try {
+      const parsed = extractStoragePathFromPublicUrl(complaint.file_url);
+      if (!parsed) {
+        setFileErrorById((prev) => ({ ...prev, [complaint.id]: 'Cannot parse stored file URL.' }));
+        return;
+      }
+
+      const remove = await supabase.storage.from(parsed.bucket).remove([parsed.path]);
+      if (remove.error) {
+        setFileErrorById((prev) => ({ ...prev, [complaint.id]: remove.error?.message || 'Delete failed.' }));
+        return;
+      }
+
+      const { error: updateError } = await supabase
+        .from('complaints')
+        .update({ file_url: null })
+        .eq('id', complaint.id);
+
+      if (updateError) {
+        setFileErrorById((prev) => ({ ...prev, [complaint.id]: updateError.message }));
+        return;
+      }
+
+      void loadComplaints();
+    } catch {
+      setFileErrorById((prev) => ({ ...prev, [complaint.id]: 'Failed to delete file.' }));
+    } finally {
+      setFileSavingId(null);
+    }
+  };
+
   const calculateStats = (data: Complaint[]) => {
     const today = new Date().toDateString();
     const todayComplaints = data.filter(
       (c) => new Date(c.created_at).toDateString() === today
     );
-    const highPriority = data.filter((c) => c.severity === 'high');
-    const duplicates = data.filter((c) => c.is_duplicate);
+    const highPriority = todayComplaints.filter((c) => c.severity === 'high');
+    const duplicates = todayComplaints.filter((c) => c.is_duplicate);
 
     setStats({
       total: todayComplaints.length,
@@ -288,6 +387,13 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
 
   const filterComplaints = () => {
     let filtered = [...complaints];
+
+    // Priority tab: show only high priority complaints.
+    if (complaintView === 'priority') {
+      filtered = filtered.filter(
+        (c) => c.severity === 'high' || (typeof c.severity_score === 'number' && c.severity_score >= 80)
+      );
+    }
 
     if (filterSeverity !== 'all') {
       filtered = filtered.filter((c) => c.severity === filterSeverity);
@@ -866,6 +972,22 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
         </Card>
 
         <Card title="All Complaints">
+          <div className="flex gap-3 mb-4">
+            <Button
+              size="sm"
+              variant={complaintView === 'all' ? 'primary' : 'secondary'}
+              onClick={() => setComplaintView('all')}
+            >
+              All
+            </Button>
+            <Button
+              size="sm"
+              variant={complaintView === 'priority' ? 'primary' : 'secondary'}
+              onClick={() => setComplaintView('priority')}
+            >
+              Priority
+            </Button>
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
@@ -980,19 +1102,71 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
                         </div>
                       </td>
                       <td className="py-3 px-4">
-                        {complaint.file_url ? (
-                          <Button
-                            size="sm"
-                            onClick={() =>
-                              window.open(complaint.file_url as string, '_blank', 'noopener,noreferrer')
-                            }
-                          >
-                            <Eye className="h-4 w-4 mr-1" />
-                            View Complaint
-                          </Button>
-                        ) : (
-                          <span className="text-textSecondary text-sm">No file</span>
-                        )}
+                        <div className="flex flex-col gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            {complaint.file_url ? (
+                              <Button
+                                size="sm"
+                                onClick={() =>
+                                  window.open(complaint.file_url as string, '_blank', 'noopener,noreferrer')
+                                }
+                              >
+                                <Eye className="h-4 w-4 mr-1" />
+                                View
+                              </Button>
+                            ) : (
+                              <span className="text-textSecondary text-sm">No file</span>
+                            )}
+
+                            <label className="inline-flex items-center gap-2 px-3 py-1.5 border border-khaki rounded-lg bg-white text-textPrimary cursor-pointer">
+                              <Upload className="h-4 w-4" />
+                              <span className="text-sm">{complaint.file_url ? 'Replace' : 'Add'}</span>
+                              <input
+                                type="file"
+                                accept=".pdf,.jpg,.jpeg,.png"
+                                className="hidden"
+                                onChange={(e) =>
+                                  setFileDraftById((prev) => ({
+                                    ...prev,
+                                    [complaint.id]: e.target.files?.[0] ?? null,
+                                  }))
+                                }
+                              />
+                            </label>
+
+                            {fileDraftById[complaint.id] ? (
+                              <Button
+                                size="sm"
+                                disabled={fileSavingId === complaint.id}
+                                onClick={() => void handleUploadOrReplaceFile(complaint)}
+                              >
+                                Save
+                              </Button>
+                            ) : null}
+
+                            {complaint.file_url ? (
+                              <Button
+                                size="sm"
+                                variant="danger"
+                                disabled={fileSavingId === complaint.id}
+                                onClick={() => void handleDeleteFile(complaint)}
+                              >
+                                <Trash2 className="h-4 w-4 mr-1" />
+                                Delete
+                              </Button>
+                            ) : null}
+                          </div>
+
+                          {fileDraftById[complaint.id] ? (
+                            <div className="text-xs text-textSecondary">
+                              Selected: {fileDraftById[complaint.id]?.name}
+                            </div>
+                          ) : null}
+
+                          {fileErrorById[complaint.id] ? (
+                            <div className="text-xs text-priority-high">{fileErrorById[complaint.id]}</div>
+                          ) : null}
+                        </div>
                       </td>
                     </tr>
                   ))

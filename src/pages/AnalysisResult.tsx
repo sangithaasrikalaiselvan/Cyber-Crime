@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { CheckCircle, Copy, Eye } from 'lucide-react';
 import Button from '../components/Button';
 import Card from '../components/Card';
@@ -54,7 +54,35 @@ export default function AnalysisResult({
   const [fileUploadError, setFileUploadError] = useState('');
   const [copied, setCopied] = useState(false);
 
-  const extracted = useMemo(() => extractDetails(complaintText), [complaintText]);
+  const mlServiceUrl = (import.meta.env.VITE_ML_SERVICE_URL as string | undefined)?.trim();
+
+  const analyzeAttachment = async (attachment: File) => {
+    if (!mlServiceUrl) return null;
+
+    const fd = new FormData();
+    fd.append('file', attachment);
+
+    const res = await fetch(`${mlServiceUrl.replace(/\/$/, '')}/analyze`, {
+      method: 'POST',
+      body: fd,
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(text || `ML service error (${res.status})`);
+    }
+
+    return (await res.json()) as {
+      text?: string;
+      crime_type?: string;
+      category?: string;
+      severity?: 'low' | 'medium' | 'high';
+      severity_score?: number;
+      platform?: string;
+      amount?: number;
+      matched_keywords?: string[];
+    };
+  };
 
   useEffect(() => {
     const submitComplaint = async () => {
@@ -67,6 +95,33 @@ export default function AnalysisResult({
 
       const normalizedName = complainantName?.trim();
       const finalComplainantName = normalizedName && normalizedName.length > 0 ? normalizedName : 'Not specified';
+
+      let effectiveText = complaintText;
+      let modelSeverity: 'low' | 'medium' | 'high' | undefined;
+      let modelSeverityScore: number | undefined;
+      let modelPlatform: string | undefined;
+      let modelAmount: number | undefined;
+      let modelCrimeType: string | undefined;
+
+      if (file && mlServiceUrl) {
+        try {
+          const r = await analyzeAttachment(file);
+          if (r?.text && r.text.trim().length > 0) {
+            effectiveText = r.text;
+          }
+          modelSeverity = r?.severity;
+          modelSeverityScore = r?.severity_score;
+          modelPlatform = r?.platform;
+          modelAmount = r?.amount;
+          modelCrimeType = r?.crime_type || r?.category;
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : 'Failed to analyze uploaded file.';
+          // Non-fatal: continue submission using provided complaint text.
+          setFileUploadError(msg);
+        }
+      }
+
+      const extracted = extractDetails(effectiveText);
 
       const getNotNullFallback = (column: string): unknown => {
         const key = column.toLowerCase();
@@ -91,17 +146,18 @@ export default function AnalysisResult({
       };
 
       let payload: Record<string, unknown> = {
-        complaint_text: complaintText,
+        complaint_text: effectiveText,
         language,
-        category: extracted.category ?? null,
-        bank_app: extracted.platform ?? null,
-        amount_involved: extracted.amount ?? null,
-        crime_type: extracted.category ?? null,
+        category: modelCrimeType ?? extracted.category ?? null,
+        bank_app: modelPlatform ?? extracted.platform ?? null,
+        amount_involved: modelAmount ?? extracted.amount ?? null,
+        crime_type: modelCrimeType ?? extracted.category ?? null,
         complainant_name: finalComplainantName,
         victim_name: finalComplainantName,
         victim_phone: extracted.phone ?? null,
         incident_date: new Date().toISOString().slice(0, 10),
-        severity_score: 0,
+        severity: modelSeverity ?? null,
+        severity_score: modelSeverityScore ?? 0,
         status: 'Registered',
         is_duplicate: false,
       };
@@ -116,6 +172,7 @@ export default function AnalysisResult({
         'victim_name',
         'victim_phone',
         'incident_date',
+        'severity',
         'severity_score',
         'is_duplicate',
         'status',
@@ -189,16 +246,22 @@ export default function AnalysisResult({
               .from('complaints')
               .update({ file_url: publicUrl })
               .eq('id', createdComplaint.id)
-              .select('*')
-              .single();
+              .select('*');
 
             if (updateError) {
               setFileUploadError(`Saved complaint, but failed to attach file URL. (${updateError.message})`);
+              // Still show the complaint as submitted; the file is uploaded but the DB link update failed.
               setComplaint(createdComplaint);
               return;
             }
 
-            createdComplaint = updated as Complaint;
+            // PostgREST returns an array for update+select. If it's empty (RLS/returning),
+            // still keep the local URL so officers can verify upload by reloading later.
+            const updatedRow = Array.isArray(updated) ? updated[0] : updated;
+            createdComplaint = (updatedRow as Complaint | undefined) ?? ({
+              ...createdComplaint,
+              file_url: publicUrl,
+            } as Complaint);
           }
         } catch {
           setFileUploadError('Saved complaint, but file upload failed.');
@@ -209,7 +272,7 @@ export default function AnalysisResult({
     };
 
     void submitComplaint();
-  }, [complaintText, language, complainantName, file, extracted.category, extracted.platform, extracted.amount, extracted.phone]);
+  }, [complaintText, language, complainantName, file, mlServiceUrl]);
 
   const trackingId = complaint?.id ? complaint.id.split('-')[0].toUpperCase() : '';
 
