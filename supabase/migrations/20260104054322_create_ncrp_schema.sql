@@ -37,8 +37,8 @@ CREATE TABLE IF NOT EXISTS complaints (
 );
 
 -- Create officers table
-CREATE TABLE IF NOT EXISTS officers (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+CREATE TABLE officers (
+  id uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   email text UNIQUE NOT NULL,
   name text NOT NULL,
   badge_number text UNIQUE NOT NULL,

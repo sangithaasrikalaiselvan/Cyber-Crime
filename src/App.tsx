@@ -14,6 +14,8 @@ function App() {
   const [complaintData, setComplaintData] = useState<{
     text: string;
     language: Language;
+    complainantName: string;
+    file?: File;
   } | null>(null);
   const [trackingId, setTrackingId] = useState<string>('');
 
@@ -25,8 +27,13 @@ function App() {
     window.scrollTo(0, 0);
   };
 
-  const handleAnalyze = (complaintText: string, language: Language) => {
-    setComplaintData({ text: complaintText, language });
+  const handleAnalyze = (
+    complaintText: string,
+    language: Language,
+    complainantName: string,
+    file?: File
+  ) => {
+    setComplaintData({ text: complaintText, language, complainantName, file });
     setCurrentPage('analysis');
   };
 
@@ -35,12 +42,14 @@ function App() {
       case 'landing':
         return <LandingPage onNavigate={handleNavigate} />;
       case 'submit':
-        return <ComplaintSubmission onAnalyze={handleAnalyze} />;
+        return <ComplaintSubmission onAnalyze={handleAnalyze} onNavigate={handleNavigate} />;
       case 'analysis':
         return complaintData ? (
           <AnalysisResult
             complaintText={complaintData.text}
             language={complaintData.language}
+            complainantName={complaintData.complainantName}
+            file={complaintData.file}
             onNavigate={handleNavigate}
           />
         ) : (

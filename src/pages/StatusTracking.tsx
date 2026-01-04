@@ -38,31 +38,86 @@ export default function StatusTracking({ trackingId, onNavigate }: StatusTrackin
       return;
     }
 
-    const idToSearch = id || searchId;
+    const idToSearch = (id || searchId).trim();
     if (!idToSearch) return;
+
+    const normalizedPrefix = idToSearch.toLowerCase();
 
     setLoading(true);
     setError('');
 
+    let found: Complaint | null = null;
+
+    // Fast path: try server-side prefix search (works if id is text).
     const { data: complaints, error: complaintError } = await supabase
       .from('complaints')
       .select('*')
+      // NOTE: this fails when id is uuid; we handle that below.
       .ilike('id', `${idToSearch}%`)
       .limit(1);
 
-    if (complaintError || !complaints || complaints.length === 0) {
+    if (!complaintError && complaints && complaints.length > 0) {
+      found = complaints[0];
+    }
+
+    // Fallback: if id is UUID, ilike may throw "operator does not exist".
+    // In that case, fetch recent complaints and do a client-side prefix match.
+    if (!found && complaintError) {
+      const msg = complaintError.message || '';
+      const looksLikeUuidIlikeIssue =
+        msg.toLowerCase().includes('operator does not exist') ||
+        msg.toLowerCase().includes('uuid') ||
+        msg.toLowerCase().includes('ilike');
+
+      if (!looksLikeUuidIlikeIssue) {
+        setError(msg || 'Failed to search complaint.');
+        setLoading(false);
+        return;
+      }
+
+      const { data: recent, error: recentError } = await supabase
+        .from('complaints')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(500);
+
+      if (recentError) {
+        setError(recentError.message || 'Failed to search complaint.');
+        setLoading(false);
+        return;
+      }
+
+      found = (recent ?? []).find((c) => c.id.toLowerCase().startsWith(normalizedPrefix)) ?? null;
+    }
+
+    if (!found) {
       setError('Complaint not found. Please check your tracking ID.');
       setLoading(false);
       return;
     }
 
-    setComplaint(complaints[0]);
+    setComplaint(found);
 
-    const { data: updates } = await supabase
+    const { data: updates, error: updatesError } = await supabase
       .from('status_updates')
       .select('*')
-      .eq('complaint_id', complaints[0].id)
+      .eq('complaint_id', found.id)
       .order('created_at', { ascending: false });
+
+    if (updatesError) {
+      const msg = updatesError.message || '';
+      // If the status_updates table doesn't exist (or schema cache hasn't reloaded),
+      // still allow complaint tracking to work without history.
+      if (msg.includes("Could not find the table 'public.status_updates'")) {
+        setStatusUpdates([]);
+        setLoading(false);
+        return;
+      }
+
+      setError(msg || 'Failed to load status updates.');
+      setLoading(false);
+      return;
+    }
 
     if (updates) {
       setStatusUpdates(updates);

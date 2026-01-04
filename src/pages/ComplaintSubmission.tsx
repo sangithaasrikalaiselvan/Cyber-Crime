@@ -6,15 +6,36 @@ import Loading from '../components/Loading';
 import { Language } from '../types';
 
 interface ComplaintSubmissionProps {
-  onAnalyze: (complaintText: string, language: Language, file?: File) => void;
+  onAnalyze: (
+    complaintText: string,
+    language: Language,
+    complainantName: string,
+    file?: File
+  ) => void;
+  onNavigate: (page: string, complaintId?: string) => void;
 }
 
-export default function ComplaintSubmission({ onAnalyze }: ComplaintSubmissionProps) {
+export default function ComplaintSubmission({ onAnalyze, onNavigate }: ComplaintSubmissionProps) {
+  const [complainantName, setComplainantName] = useState('');
+  const [aadharNumber, setAadharNumber] = useState('');
+  const [formError, setFormError] = useState('');
   const [complaintText, setComplaintText] = useState('');
   const [language, setLanguage] = useState<Language>('english');
   const [file, setFile] = useState<File | null>(null);
   const [isRecording, setIsRecording] = useState(false);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const formatAadhar = (value: string) => {
+    const digits = value.replace(/\D/g, '').slice(0, 12);
+    const parts = [] as string[];
+    for (let i = 0; i < digits.length; i += 4) {
+      parts.push(digits.slice(i, i + 4));
+    }
+    return parts.join(' ');
+  };
+
+  const isAadharValid = /^\d{4} \d{4} \d{4}$/.test(aadharNumber);
+  const isNameValid = Boolean(complainantName.trim());
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -35,13 +56,24 @@ export default function ComplaintSubmission({ onAnalyze }: ComplaintSubmissionPr
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (complaintText.trim()) {
-      setIsAnalyzing(true);
-      setTimeout(() => {
-        onAnalyze(complaintText, language, file || undefined);
-        setIsAnalyzing(false);
-      }, 3000);
+
+    setFormError('');
+
+    if (!isNameValid) {
+      setFormError('Please enter the complainant name.');
+      return;
     }
+
+    if (!isAadharValid) {
+      setFormError('Please enter a valid Aadhar number in the format 1234 5678 3456.');
+      return;
+    }
+
+    if (!complaintText.trim()) return;
+
+    setIsSubmitting(true);
+    onAnalyze(complaintText, language, complainantName.trim(), file || undefined);
+    setIsSubmitting(false);
   };
 
   const quickFillExample = () => {
@@ -58,19 +90,12 @@ I immediately called the real SBI customer care, and they confirmed this was a f
     );
   };
 
-  if (isAnalyzing) {
+  if (isSubmitting) {
     return (
       <div className="min-h-screen bg-khaki-light py-12">
         <div className="max-w-4xl mx-auto px-4">
           <Card>
-            <Loading message="Analyzing complaint using AI..." />
-            <div className="mt-6 space-y-2 text-center text-textSecondary">
-              <p>Reading and processing complaint text...</p>
-              <p>Extracting key information using NLP...</p>
-              <p>Classifying complaint category...</p>
-              <p>Calculating severity score...</p>
-              <p>Checking for duplicate patterns...</p>
-            </div>
+            <Loading message="Submitting your complaint..." />
           </Card>
         </div>
       </div>
@@ -83,12 +108,45 @@ I immediately called the real SBI customer care, and they confirmed this was a f
         <div className="text-center mb-8">
           <h1 className="text-4xl font-bold text-textPrimary mb-3">Submit Cybercrime Complaint</h1>
           <p className="text-lg text-textSecondary">
-            Our AI system will automatically analyze and classify your complaint
+            Submit your complaint details for review
           </p>
         </div>
 
         <Card>
           <form onSubmit={handleSubmit}>
+            {formError && (
+              <div className="mb-6 p-3 bg-priority-high bg-opacity-10 border-l-4 border-priority-high rounded text-priority-high">
+                {formError}
+              </div>
+            )}
+
+            <div className="mb-6">
+              <label className="block text-textPrimary font-semibold mb-2">Complainant Name</label>
+              <input
+                type="text"
+                value={complainantName}
+                onChange={(e) => setComplainantName(e.target.value)}
+                placeholder="Enter your full name"
+                className="w-full px-4 py-3 border-2 border-khaki rounded-lg focus:outline-none focus:border-khaki-dark"
+                required
+              />
+            </div>
+
+            <div className="mb-6">
+              <label className="block text-textPrimary font-semibold mb-2">Aadhar Number</label>
+              <input
+                type="text"
+                inputMode="numeric"
+                value={aadharNumber}
+                onChange={(e) => setAadharNumber(formatAadhar(e.target.value))}
+                placeholder="1234 5678 3456"
+                maxLength={14}
+                className="w-full px-4 py-3 border-2 border-khaki rounded-lg focus:outline-none focus:border-khaki-dark"
+                required
+              />
+              <p className="text-xs text-textSecondary mt-2">Format: 1234 5678 3456</p>
+            </div>
+
             <div className="mb-6">
               <label className="block text-textPrimary font-semibold mb-2">
                 Select Language
@@ -186,11 +244,18 @@ I immediately called the real SBI customer care, and they confirmed this was a f
             </div>
 
             <div className="flex justify-end space-x-4">
+              <Button type="button" variant="secondary" onClick={() => onNavigate('status')}>
+                Track Complaint
+              </Button>
               <Button type="button" variant="secondary" onClick={() => window.location.reload()}>
                 Clear Form
               </Button>
-              <Button type="submit" size="lg" disabled={!complaintText.trim()}>
-                Analyze Complaint with AI
+              <Button
+                type="submit"
+                size="lg"
+                disabled={!complaintText.trim() || !isNameValid || !isAadharValid}
+              >
+                Submit Complaint
               </Button>
             </div>
           </form>
@@ -199,11 +264,9 @@ I immediately called the real SBI customer care, and they confirmed this was a f
         <div className="mt-8 bg-white border-l-4 border-khaki-dark rounded-lg p-6">
           <h3 className="font-bold text-textPrimary mb-2">What happens next?</h3>
           <ul className="space-y-2 text-textSecondary">
-            <li>✓ AI will automatically read and classify your complaint</li>
-            <li>✓ System will extract key information and assess severity</li>
-            <li>✓ Duplicate complaints and scam patterns will be detected</li>
-            <li>✓ Your complaint will be prioritized based on risk level</li>
+            <li>✓ Your complaint will be registered in the system</li>
             <li>✓ You will receive a tracking ID to check status updates</li>
+            <li>✓ Officers can view your complaint in the dashboard</li>
           </ul>
         </div>
       </div>

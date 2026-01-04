@@ -36,8 +36,10 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
   const [profileName, setProfileName] = useState('');
   const [profileBadgeNumber, setProfileBadgeNumber] = useState('');
   const [profileDob, setProfileDob] = useState('');
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [complaints, setComplaints] = useState<Complaint[]>([]);
   const [filteredComplaints, setFilteredComplaints] = useState<Complaint[]>([]);
+  const [complaintsError, setComplaintsError] = useState('');
   const [filterSeverity, setFilterSeverity] = useState<string>('all');
   const [filterCategory, setFilterCategory] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -46,6 +48,17 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
     high: 0,
     duplicates: 0,
   });
+
+  const [statusDrafts, setStatusDrafts] = useState<
+    Record<string, { status: string; message: string }>
+  >({});
+  const [statusSavingId, setStatusSavingId] = useState<string | null>(null);
+  const [statusErrorById, setStatusErrorById] = useState<Record<string, string>>({});
+
+  const statusOptions = useMemo(
+    () => ['Registered', 'Under Review', 'Investigation', 'FIR Filed', 'Resolved'],
+    []
+  );
 
   const isLoggedIn = useMemo(() => Boolean(sessionUserId), [sessionUserId]);
 
@@ -91,8 +104,35 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
 
   useEffect(() => {
     if (!supabase) return;
+    if (!isLoggedIn) return;
+
     const sb = supabase;
-    if (!isLoggedIn || !sessionEmail) {
+
+    const channel = sb
+      .channel('complaints-live-refresh')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'complaints' },
+        () => {
+          void loadComplaints();
+        }
+      )
+      .subscribe();
+
+    const intervalId = window.setInterval(() => {
+      void loadComplaints();
+    }, 15000);
+
+    return () => {
+      window.clearInterval(intervalId);
+      void sb.removeChannel(channel);
+    };
+  }, [isLoggedIn]);
+
+  useEffect(() => {
+    if (!supabase) return;
+    const sb = supabase;
+    if (!isLoggedIn || !sessionEmail || !sessionUserId) {
       setOfficerProfile(null);
       return;
     }
@@ -106,7 +146,7 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
         const { data, error } = await sb
           .from('officers')
           .select('*')
-          .eq('email', sessionEmail)
+          .eq('id', sessionUserId)
           .maybeSingle();
 
         if (!isMounted) return;
@@ -133,7 +173,7 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
     return () => {
       isMounted = false;
     };
-  }, [isLoggedIn, sessionEmail]);
+  }, [isLoggedIn, sessionEmail, sessionUserId]);
 
   useEffect(() => {
     filterComplaints();
@@ -149,9 +189,85 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
       .select('*')
       .order('created_at', { ascending: false });
 
-    if (data && !error) {
-      setComplaints(data);
-      calculateStats(data);
+    if (error) {
+      setComplaintsError(error.message);
+      setComplaints([]);
+      calculateStats([]);
+      return;
+    }
+
+    setComplaintsError('');
+    setComplaints(data ?? []);
+    calculateStats((data ?? []) as Complaint[]);
+  };
+
+  const getStatusDraft = (complaint: Complaint) => {
+    return (
+      statusDrafts[complaint.id] ?? {
+        status: complaint.status,
+        message: '',
+      }
+    );
+  };
+
+  const updateStatusDraft = (complaintId: string, patch: Partial<{ status: string; message: string }>) => {
+    setStatusDrafts((prev) => ({
+      ...prev,
+      [complaintId]: {
+        status: prev[complaintId]?.status ?? '',
+        message: prev[complaintId]?.message ?? '',
+        ...patch,
+      },
+    }));
+  };
+
+  const handleSaveComplaintStatus = async (complaint: Complaint) => {
+    if (!supabase || !sessionUserId) return;
+
+    const draft = getStatusDraft(complaint);
+    const nextStatus = (draft.status || '').trim();
+    if (!nextStatus) return;
+
+    const message = (draft.message || '').trim() || `Status updated to "${nextStatus}".`;
+
+    setStatusSavingId(complaint.id);
+    setStatusErrorById((prev) => ({ ...prev, [complaint.id]: '' }));
+
+    try {
+      const { error: complaintUpdateError } = await supabase
+        .from('complaints')
+        .update({ status: nextStatus })
+        .eq('id', complaint.id);
+
+      if (complaintUpdateError) {
+        setStatusErrorById((prev) => ({ ...prev, [complaint.id]: complaintUpdateError.message }));
+        return;
+      }
+
+      const { error: statusInsertError } = await supabase
+        .from('status_updates')
+        .insert({
+          complaint_id: complaint.id,
+          status: nextStatus,
+          message,
+          updated_by: sessionUserId,
+        });
+
+      if (statusInsertError) {
+        // If the table doesn't exist (or schema cache not reloaded), don't block status updates.
+        const msg = statusInsertError.message || '';
+        if (!msg.includes("Could not find the table 'public.status_updates'")) {
+          setStatusErrorById((prev) => ({ ...prev, [complaint.id]: msg }));
+          return;
+        }
+      }
+
+      updateStatusDraft(complaint.id, { message: '' });
+      void loadComplaints();
+    } catch {
+      setStatusErrorById((prev) => ({ ...prev, [complaint.id]: 'Failed to update status.' }));
+    } finally {
+      setStatusSavingId(null);
     }
   };
 
@@ -182,11 +298,17 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
     }
 
     if (searchQuery) {
+      const q = searchQuery.toLowerCase();
       filtered = filtered.filter(
         (c) =>
-          c.complaint_text.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          c.victim_name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          c.id.toLowerCase().includes(searchQuery.toLowerCase())
+          c.complaint_text.toLowerCase().includes(q) ||
+          c.victim_name?.toLowerCase().includes(q) ||
+          c.victim_phone?.toLowerCase().includes(q) ||
+          c.category?.toLowerCase().includes(q) ||
+          c.bank_app?.toLowerCase().includes(q) ||
+          c.status?.toLowerCase().includes(q) ||
+          c.id.toLowerCase().includes(q) ||
+          c.id.split('-')[0].toLowerCase().includes(q)
       );
     }
 
@@ -296,6 +418,7 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!supabase || !isLoggedIn || !sessionEmail) return;
+    if (!sessionUserId) return;
 
     if (!profileName.trim()) {
       setProfileError('Enter your name.');
@@ -324,7 +447,7 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
             badge_number: profileBadgeNumber.trim(),
             dob: profileDob,
           },
-          { onConflict: 'email' }
+          { onConflict: 'id' }
         )
         .select('*')
         .single();
@@ -335,20 +458,12 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
       }
 
       setOfficerProfile(data as Officer);
+      setIsEditingProfile(false);
     } catch {
       setProfileError('Failed to save profile.');
     } finally {
       setProfileLoading(false);
     }
-  };
-
-  const getSeverityBadge = (severity: string) => {
-    const colors = {
-      high: 'bg-priority-high',
-      medium: 'bg-priority-medium',
-      low: 'bg-priority-low',
-    };
-    return colors[severity as keyof typeof colors] || 'bg-gray-500';
   };
 
   if (!supabase) {
@@ -499,13 +614,15 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
     !officerProfile.badge_number ||
     !officerProfile.dob;
 
-  if (needsProfile) {
+  if (needsProfile || isEditingProfile) {
     return (
       <div className="min-h-screen bg-khaki-light flex items-center justify-center py-12">
         <Card className="max-w-xl w-full">
           <h2 className="text-2xl font-bold text-textPrimary mb-2">Officer Profile</h2>
           <p className="text-textSecondary mb-6">
-            Complete your profile to access the dashboard.
+            {needsProfile
+              ? 'Complete your profile to access the dashboard.'
+              : 'Update your profile details.'}
           </p>
 
           {profileLoading && !officerProfile && (
@@ -568,17 +685,34 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
               <Button type="submit" size="lg" disabled={profileLoading}>
                 {profileLoading ? 'Saving...' : 'Save Profile'}
               </Button>
-              <Button
-                type="button"
-                variant="secondary"
-                size="lg"
-                onClick={() => {
-                  supabase?.auth.signOut();
-                  onNavigate('landing');
-                }}
-              >
-                Logout
-              </Button>
+              {needsProfile ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="lg"
+                  onClick={() => {
+                    supabase?.auth.signOut();
+                    onNavigate('landing');
+                  }}
+                >
+                  Logout
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="lg"
+                  onClick={() => {
+                    setIsEditingProfile(false);
+                    setProfileError('');
+                    setProfileName(officerProfile?.name ?? '');
+                    setProfileBadgeNumber(officerProfile?.badge_number ?? '');
+                    setProfileDob(officerProfile?.dob ?? '');
+                  }}
+                >
+                  Cancel
+                </Button>
+              )}
             </div>
           </form>
         </Card>
@@ -621,17 +755,29 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
               {officerProfile?.name} ({officerProfile?.badge_number})
             </p>
           </div>
-          <Button
-            variant="secondary"
-            onClick={() => {
-              supabase?.auth.signOut();
-              onNavigate('landing');
-            }}
-            className="border-white text-white hover:bg-white hover:text-khaki-dark"
-          >
-            <LogOut className="h-5 w-5 mr-2" />
-            Logout
-          </Button>
+          <div className="flex items-center gap-3">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setIsEditingProfile(true);
+                setProfileError('');
+              }}
+              className="border-white text-white hover:bg-white hover:text-khaki-dark"
+            >
+              Edit Profile
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                supabase?.auth.signOut();
+                onNavigate('landing');
+              }}
+              className="border-white text-white hover:bg-white hover:text-khaki-dark"
+            >
+              <LogOut className="h-5 w-5 mr-2" />
+              Logout
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -679,7 +825,7 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search by ID, victim name, or text..."
+                placeholder="Search by complaint ID, complainant name, platform, or status..."
                 className="w-full px-4 py-2 border-2 border-khaki rounded-lg focus:outline-none focus:border-khaki-dark"
               />
             </div>
@@ -724,31 +870,42 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
             <table className="w-full">
               <thead>
                 <tr className="border-b-2 border-khaki">
-                  <th className="text-left py-3 px-4 text-textPrimary font-semibold">ID</th>
                   <th className="text-left py-3 px-4 text-textPrimary font-semibold">
-                    Category
+                    Complaint ID
                   </th>
                   <th className="text-left py-3 px-4 text-textPrimary font-semibold">
-                    Severity
+                    Date and Time
                   </th>
                   <th className="text-left py-3 px-4 text-textPrimary font-semibold">
-                    Amount
+                    Complainant details
                   </th>
                   <th className="text-left py-3 px-4 text-textPrimary font-semibold">
-                    Status
+                    Type of cybercrime
                   </th>
                   <th className="text-left py-3 px-4 text-textPrimary font-semibold">
-                    Date
+                    Platform involved
                   </th>
                   <th className="text-left py-3 px-4 text-textPrimary font-semibold">
-                    Actions
+                    Amount lost
+                  </th>
+                  <th className="text-left py-3 px-4 text-textPrimary font-semibold">
+                    Current status
+                  </th>
+                  <th className="text-left py-3 px-4 text-textPrimary font-semibold">
+                    File submitted
                   </th>
                 </tr>
               </thead>
               <tbody>
-                {filteredComplaints.length === 0 ? (
+                {complaintsError ? (
                   <tr>
-                    <td colSpan={7} className="text-center py-8 text-textSecondary">
+                    <td colSpan={8} className="text-center py-8 text-priority-high">
+                      Unable to load complaints: {complaintsError}
+                    </td>
+                  </tr>
+                ) : filteredComplaints.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="text-center py-8 text-textSecondary">
                       No complaints found matching your filters
                     </td>
                   </tr>
@@ -765,33 +922,77 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
                           </span>
                         )}
                       </td>
-                      <td className="py-3 px-4 text-textPrimary">{complaint.category}</td>
-                      <td className="py-3 px-4">
-                        <span
-                          className={`${getSeverityBadge(complaint.severity || 'low')} text-white px-3 py-1 rounded-full text-sm font-semibold uppercase`}
-                        >
-                          {complaint.severity}
-                        </span>
+                      <td className="py-3 px-4 text-textSecondary">
+                        {new Date(complaint.created_at).toLocaleString('en-IN')}
                       </td>
+                      <td className="py-3 px-4">
+                        <div className="text-textPrimary">
+                          {complaint.victim_name && complaint.victim_name !== 'Not specified'
+                            ? complaint.victim_name
+                            : '-'}
+                        </div>
+                        <div className="text-xs text-textSecondary">
+                          {complaint.victim_phone ? complaint.victim_phone : ''}
+                        </div>
+                      </td>
+                      <td className="py-3 px-4 text-textPrimary">{complaint.category || '-'}</td>
+                      <td className="py-3 px-4 text-textPrimary">{complaint.bank_app || '-'}</td>
                       <td className="py-3 px-4 text-textPrimary font-semibold">
                         {complaint.amount_involved
                           ? `₹${complaint.amount_involved.toLocaleString('en-IN')}`
                           : '-'}
                       </td>
-                      <td className="py-3 px-4 text-textSecondary">{complaint.status}</td>
                       <td className="py-3 px-4 text-textSecondary">
-                        {new Date(complaint.created_at).toLocaleDateString('en-IN')}
+                        <div className="font-medium text-textPrimary">{complaint.status}</div>
+                        <div className="mt-2 flex flex-col gap-2">
+                          <select
+                            value={getStatusDraft(complaint).status}
+                            onChange={(e) => updateStatusDraft(complaint.id, { status: e.target.value })}
+                            className="w-full px-3 py-2 border border-khaki rounded-lg bg-white text-textPrimary focus:outline-none focus:border-khaki-dark"
+                          >
+                            {statusOptions.map((opt) => (
+                              <option key={opt} value={opt}>
+                                {opt}
+                              </option>
+                            ))}
+                          </select>
+                          <input
+                            type="text"
+                            value={getStatusDraft(complaint).message}
+                            onChange={(e) => updateStatusDraft(complaint.id, { message: e.target.value })}
+                            placeholder="Optional message"
+                            className="w-full px-3 py-2 border border-khaki rounded-lg bg-white text-textPrimary focus:outline-none focus:border-khaki-dark"
+                          />
+                          <div className="flex items-center gap-2">
+                            <Button
+                              size="sm"
+                              disabled={statusSavingId === complaint.id}
+                              onClick={() => void handleSaveComplaintStatus(complaint)}
+                            >
+                              Save
+                            </Button>
+                            {statusErrorById[complaint.id] ? (
+                              <span className="text-priority-high text-xs">
+                                {statusErrorById[complaint.id]}
+                              </span>
+                            ) : null}
+                          </div>
+                        </div>
                       </td>
                       <td className="py-3 px-4">
-                        <Button
-                          size="sm"
-                          onClick={() =>
-                            onNavigate('status', complaint.id.split('-')[0].toUpperCase())
-                          }
-                        >
-                          <Eye className="h-4 w-4 mr-1" />
-                          View
-                        </Button>
+                        {complaint.file_url ? (
+                          <Button
+                            size="sm"
+                            onClick={() =>
+                              window.open(complaint.file_url as string, '_blank', 'noopener,noreferrer')
+                            }
+                          >
+                            <Eye className="h-4 w-4 mr-1" />
+                            View Complaint
+                          </Button>
+                        ) : (
+                          <span className="text-textSecondary text-sm">No file</span>
+                        )}
                       </td>
                     </tr>
                   ))
