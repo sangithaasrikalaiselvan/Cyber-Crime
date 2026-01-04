@@ -28,6 +28,7 @@ export interface Officer {
   email: string;
   name: string;
   badge_number: string;
+  dob?: string;
   created_at: string;
 }
 

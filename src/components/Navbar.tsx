@@ -14,7 +14,7 @@ export default function Navbar({ onNavigate, currentPage }: NavbarProps) {
             className="flex items-center cursor-pointer"
             onClick={() => onNavigate('landing')}
           >
-            <Shield className="h-8 w-8 text-white mr-3" />
+            <Shield className="h-8 w-8 text-priority-high mr-3" />
             <div>
               <h1 className="text-white font-bold text-lg">
                 Smart NCRP Intelligence System

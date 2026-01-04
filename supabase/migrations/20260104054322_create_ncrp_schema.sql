@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS officers (
   email text UNIQUE NOT NULL,
   name text NOT NULL,
   badge_number text UNIQUE NOT NULL,
+  dob date,
   created_at timestamptz DEFAULT now()
 );
 
@@ -97,6 +98,17 @@ CREATE POLICY "Authenticated users can view officers"
   TO authenticated
   USING (true);
 
+CREATE POLICY "Authenticated users can create own officer profile"
+  ON officers FOR INSERT
+  TO authenticated
+  WITH CHECK ((auth.jwt() ->> 'email') = email);
+
+CREATE POLICY "Authenticated users can update own officer profile"
+  ON officers FOR UPDATE
+  TO authenticated
+  USING ((auth.jwt() ->> 'email') = email)
+  WITH CHECK ((auth.jwt() ->> 'email') = email);
+
 -- Status updates policies: Anyone can view status updates
 CREATE POLICY "Anyone can view status updates"
   ON status_updates FOR SELECT
@@ -129,7 +141,7 @@ CREATE INDEX IF NOT EXISTS idx_status_updates_complaint_id ON status_updates(com
 
 -- Insert sample officer for testing
 INSERT INTO officers (email, name, badge_number)
-VALUES ('officer@ncrp.gov.in', 'Inspector Sharma', 'TN001')
+VALUES ('officer@gmail.com', 'Inspector Sharma', 'TN001')
 ON CONFLICT (email) DO NOTHING;
 
 -- Insert sample scam pattern

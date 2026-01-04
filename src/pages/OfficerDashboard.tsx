@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle,
   FileText,
@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import Button from '../components/Button';
 import Card from '../components/Card';
-import { Complaint } from '../types';
+import { Complaint, Officer } from '../types';
 import { supabase } from '../lib/supabase';
 
 interface OfficerDashboardProps {
@@ -19,8 +19,23 @@ interface OfficerDashboardProps {
 }
 
 export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) {
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [sessionUserId, setSessionUserId] = useState<string | null>(null);
+  const [sessionEmail, setSessionEmail] = useState<string>('');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState('');
+
+  const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
   const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [authInfo, setAuthInfo] = useState('');
+
+  const [officerProfile, setOfficerProfile] = useState<Officer | null>(null);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileError, setProfileError] = useState('');
+  const [profileName, setProfileName] = useState('');
+  const [profileBadgeNumber, setProfileBadgeNumber] = useState('');
+  const [profileDob, setProfileDob] = useState('');
   const [complaints, setComplaints] = useState<Complaint[]>([]);
   const [filteredComplaints, setFilteredComplaints] = useState<Complaint[]>([]);
   const [filterSeverity, setFilterSeverity] = useState<string>('all');
@@ -32,6 +47,42 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
     duplicates: 0,
   });
 
+  const isLoggedIn = useMemo(() => Boolean(sessionUserId), [sessionUserId]);
+
+  useEffect(() => {
+    if (!supabase) {
+      setSessionUserId(null);
+      return;
+    }
+
+    let isMounted = true;
+
+    supabase.auth
+      .getSession()
+      .then(({ data }) => {
+        if (!isMounted) return;
+        setSessionUserId(data.session?.user?.id ?? null);
+        setSessionEmail(data.session?.user?.email ?? '');
+      })
+      .catch(() => {
+        if (!isMounted) return;
+        setSessionUserId(null);
+        setSessionEmail('');
+      });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSessionUserId(session?.user?.id ?? null);
+      setSessionEmail(session?.user?.email ?? '');
+    });
+
+    return () => {
+      isMounted = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
   useEffect(() => {
     if (isLoggedIn) {
       loadComplaints();
@@ -39,10 +90,60 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
   }, [isLoggedIn]);
 
   useEffect(() => {
+    if (!supabase) return;
+    const sb = supabase;
+    if (!isLoggedIn || !sessionEmail) {
+      setOfficerProfile(null);
+      return;
+    }
+
+    let isMounted = true;
+    setProfileLoading(true);
+    setProfileError('');
+
+    const loadProfile = async () => {
+      try {
+        const { data, error } = await sb
+          .from('officers')
+          .select('*')
+          .eq('email', sessionEmail)
+          .maybeSingle();
+
+        if (!isMounted) return;
+        if (error) {
+          setProfileError(error.message);
+          setOfficerProfile(null);
+          return;
+        }
+
+        setOfficerProfile((data as Officer) ?? null);
+        if (data) {
+          setProfileName(data.name ?? '');
+          setProfileBadgeNumber(data.badge_number ?? '');
+          setProfileDob(data.dob ?? '');
+        }
+      } finally {
+        if (!isMounted) return;
+        setProfileLoading(false);
+      }
+    };
+
+    void loadProfile();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isLoggedIn, sessionEmail]);
+
+  useEffect(() => {
     filterComplaints();
   }, [complaints, filterSeverity, filterCategory, searchQuery]);
 
   const loadComplaints = async () => {
+    if (!supabase) {
+      return;
+    }
+
     const { data, error } = await supabase
       .from('complaints')
       .select('*')
@@ -92,12 +193,152 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
     setFilteredComplaints(filtered);
   };
 
-  const handleLogin = (e: React.FormEvent) => {
+  type GmailCheck = { ok: false; message: string } | { ok: true; email: string };
+
+  const validateGmail = (value: string): GmailCheck => {
+    const normalizedEmail = value.trim().toLowerCase();
+    if (!normalizedEmail) return { ok: false, message: 'Enter your email address.' };
+    if (!normalizedEmail.endsWith('@gmail.com')) {
+      return { ok: false, message: 'Please use a Gmail address (example: officer@gmail.com).' };
+    }
+    return { ok: true, email: normalizedEmail };
+  };
+
+  const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (email === 'officer@ncrp.gov.in') {
-      setIsLoggedIn(true);
-    } else {
-      alert('Invalid credentials. Use: officer@ncrp.gov.in');
+    if (!supabase) {
+      setAuthError(
+        'Supabase is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in a .env file, then restart the dev server.'
+      );
+      return;
+    }
+
+    const emailCheck = validateGmail(email);
+    if (!emailCheck.ok) {
+      setAuthError(emailCheck.message);
+      return;
+    }
+
+    if (!password) {
+      setAuthError('Enter your password.');
+      return;
+    }
+
+    setAuthError('');
+    setAuthLoading(true);
+    setAuthInfo('');
+    try {
+      const { error } = await supabase.auth.signInWithPassword({
+        email: emailCheck.email,
+        password,
+      });
+      if (error) {
+        setAuthError(error.message);
+      }
+    } catch {
+      setAuthError('Email sign-in failed.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleSignUp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!supabase) {
+      setAuthError(
+        'Supabase is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in a .env file, then restart the dev server.'
+      );
+      return;
+    }
+
+    const emailCheck = validateGmail(email);
+    if (!emailCheck.ok) {
+      setAuthError(emailCheck.message);
+      return;
+    }
+
+    if (!password || password.length < 6) {
+      setAuthError('Password must be at least 6 characters.');
+      return;
+    }
+
+    if (password !== confirmPassword) {
+      setAuthError('Passwords do not match.');
+      return;
+    }
+
+    setAuthError('');
+    setAuthLoading(true);
+    setAuthInfo('');
+    try {
+      const { error } = await supabase.auth.signUp({
+        email: emailCheck.email,
+        password,
+        options: {
+          emailRedirectTo: window.location.origin,
+        },
+      });
+
+      if (error) {
+        setAuthError(error.message);
+      } else {
+        setAuthInfo(
+          'Account created. Please confirm your email (check your inbox) before signing in.'
+        );
+      }
+    } catch {
+      setAuthError('Sign-up failed.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleSaveProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!supabase || !isLoggedIn || !sessionEmail) return;
+
+    if (!profileName.trim()) {
+      setProfileError('Enter your name.');
+      return;
+    }
+    if (!profileBadgeNumber.trim()) {
+      setProfileError('Enter your badge number.');
+      return;
+    }
+    if (!profileDob) {
+      setProfileError('Select your date of birth.');
+      return;
+    }
+
+    setProfileError('');
+    setProfileLoading(true);
+
+    try {
+      const { data, error } = await supabase
+        .from('officers')
+        .upsert(
+          {
+            id: sessionUserId,
+            email: sessionEmail,
+            name: profileName.trim(),
+            badge_number: profileBadgeNumber.trim(),
+            dob: profileDob,
+          },
+          { onConflict: 'email' }
+        )
+        .select('*')
+        .single();
+
+      if (error) {
+        setProfileError(error.message);
+        return;
+      }
+
+      setOfficerProfile(data as Officer);
+    } catch {
+      setProfileError('Failed to save profile.');
+    } finally {
+      setProfileLoading(false);
     }
   };
 
@@ -109,6 +350,25 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
     };
     return colors[severity as keyof typeof colors] || 'bg-gray-500';
   };
+
+  if (!supabase) {
+    return (
+      <div className="min-h-screen bg-khaki-light flex items-center justify-center py-12">
+        <Card className="max-w-xl w-full">
+          <h2 className="text-2xl font-bold text-textPrimary mb-2">Supabase not configured</h2>
+          <p className="text-textSecondary">
+            Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in a .env file, then restart the dev
+            server.
+          </p>
+          <div className="mt-6">
+            <Button variant="secondary" onClick={() => onNavigate('landing')}>
+              Back
+            </Button>
+          </div>
+        </Card>
+      </div>
+    );
+  }
 
   if (!isLoggedIn) {
     return (
@@ -126,16 +386,61 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
             </p>
           </div>
 
-          <form onSubmit={handleLogin}>
+          {authError && (
+            <div className="mb-4 p-3 bg-priority-high bg-opacity-10 border-l-4 border-priority-high rounded text-priority-high">
+              {authError}
+            </div>
+          )}
+
+          {authInfo && (
+            <div className="mb-4 p-3 bg-khaki-light border-l-4 border-khaki-dark rounded text-textSecondary">
+              {authInfo}
+            </div>
+          )}
+
+          <div className="flex gap-2 mb-4">
+            <button
+              type="button"
+              onClick={() => {
+                setAuthMode('signin');
+                setAuthError('');
+                setAuthInfo('');
+              }}
+              className={`flex-1 px-4 py-2 rounded border-2 transition-colors ${
+                authMode === 'signin'
+                  ? 'border-khaki-dark text-khaki-dark bg-khaki-light'
+                  : 'border-khaki text-textSecondary bg-white hover:bg-khaki-light'
+              }`}
+            >
+              Sign in
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAuthMode('signup');
+                setAuthError('');
+                setAuthInfo('');
+              }}
+              className={`flex-1 px-4 py-2 rounded border-2 transition-colors ${
+                authMode === 'signup'
+                  ? 'border-khaki-dark text-khaki-dark bg-khaki-light'
+                  : 'border-khaki text-textSecondary bg-white hover:bg-khaki-light'
+              }`}
+            >
+              Sign up
+            </button>
+          </div>
+
+          <form onSubmit={authMode === 'signup' ? handleSignUp : handleSignIn}>
             <div className="mb-4">
               <label className="block text-textPrimary font-semibold mb-2">
-                Official Email
+                {authMode === 'signup' ? 'Email (create account)' : 'Email'}
               </label>
               <input
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="officer@ncrp.gov.in"
+                placeholder="officer@gmail.com"
                 className="w-full px-4 py-3 border-2 border-khaki rounded-lg focus:outline-none focus:border-khaki-dark"
                 required
               />
@@ -145,22 +450,162 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
               <label className="block text-textPrimary font-semibold mb-2">Password</label>
               <input
                 type="password"
-                placeholder="Enter your password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Enter password"
                 className="w-full px-4 py-3 border-2 border-khaki rounded-lg focus:outline-none focus:border-khaki-dark"
                 required
               />
             </div>
 
-            <Button type="submit" className="w-full" size="lg">
-              Login to Dashboard
+            {authMode === 'signup' && (
+              <div className="mb-6">
+                <label className="block text-textPrimary font-semibold mb-2">Confirm Password</label>
+                <input
+                  type="password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="Re-enter password"
+                  className="w-full px-4 py-3 border-2 border-khaki rounded-lg focus:outline-none focus:border-khaki-dark"
+                  required
+                />
+              </div>
+            )}
+
+            <Button type="submit" className="w-full" size="lg" disabled={authLoading}>
+              {authLoading
+                ? authMode === 'signup'
+                  ? 'Creating account...'
+                  : 'Signing in...'
+                : authMode === 'signup'
+                  ? 'Create account'
+                  : 'Sign in'}
             </Button>
 
-            <div className="mt-4 p-3 bg-khaki-light rounded text-sm text-textSecondary">
-              <p className="font-semibold mb-1">Demo Credentials:</p>
-              <p>Email: officer@ncrp.gov.in</p>
-              <p>Password: any password</p>
+            <p className="mt-3 text-xs text-textSecondary">
+              {authMode === 'signup'
+                ? 'A confirmation email will be sent (magic link).'
+                : 'No sign-in links. Use your email and password.'}
+            </p>
+          </form>
+        </Card>
+      </div>
+    );
+  }
+
+  const needsProfile =
+    !officerProfile ||
+    !officerProfile.name ||
+    !officerProfile.badge_number ||
+    !officerProfile.dob;
+
+  if (needsProfile) {
+    return (
+      <div className="min-h-screen bg-khaki-light flex items-center justify-center py-12">
+        <Card className="max-w-xl w-full">
+          <h2 className="text-2xl font-bold text-textPrimary mb-2">Officer Profile</h2>
+          <p className="text-textSecondary mb-6">
+            Complete your profile to access the dashboard.
+          </p>
+
+          {profileLoading && !officerProfile && (
+            <p className="text-textSecondary mb-4">Loading profile...</p>
+          )}
+
+          {profileError && (
+            <div className="mb-4 p-3 bg-priority-high bg-opacity-10 border-l-4 border-priority-high rounded text-priority-high">
+              {profileError}
+            </div>
+          )}
+
+          <form onSubmit={handleSaveProfile}>
+            <div className="mb-4">
+              <label className="block text-textPrimary font-semibold mb-2">Email</label>
+              <input
+                type="email"
+                value={sessionEmail}
+                readOnly
+                className="w-full px-4 py-3 border-2 border-khaki rounded-lg bg-khaki-light text-textSecondary"
+              />
+            </div>
+
+            <div className="mb-4">
+              <label className="block text-textPrimary font-semibold mb-2">Name</label>
+              <input
+                type="text"
+                value={profileName}
+                onChange={(e) => setProfileName(e.target.value)}
+                placeholder="Enter full name"
+                className="w-full px-4 py-3 border-2 border-khaki rounded-lg focus:outline-none focus:border-khaki-dark"
+                required
+              />
+            </div>
+
+            <div className="mb-4">
+              <label className="block text-textPrimary font-semibold mb-2">Badge Number</label>
+              <input
+                type="text"
+                value={profileBadgeNumber}
+                onChange={(e) => setProfileBadgeNumber(e.target.value)}
+                placeholder="Enter badge number"
+                className="w-full px-4 py-3 border-2 border-khaki rounded-lg focus:outline-none focus:border-khaki-dark"
+                required
+              />
+            </div>
+
+            <div className="mb-6">
+              <label className="block text-textPrimary font-semibold mb-2">Date of Birth</label>
+              <input
+                type="date"
+                value={profileDob}
+                onChange={(e) => setProfileDob(e.target.value)}
+                className="w-full px-4 py-3 border-2 border-khaki rounded-lg focus:outline-none focus:border-khaki-dark"
+                required
+              />
+            </div>
+
+            <div className="flex gap-3">
+              <Button type="submit" size="lg" disabled={profileLoading}>
+                {profileLoading ? 'Saving...' : 'Save Profile'}
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                size="lg"
+                onClick={() => {
+                  supabase?.auth.signOut();
+                  onNavigate('landing');
+                }}
+              >
+                Logout
+              </Button>
             </div>
           </form>
+        </Card>
+      </div>
+    );
+  }
+
+  if (isLoggedIn && !supabase) {
+    return (
+      <div className="min-h-screen bg-khaki-light flex items-center justify-center py-12">
+        <Card className="max-w-xl w-full">
+          <h2 className="text-2xl font-bold text-textPrimary mb-2">Supabase not configured</h2>
+          <p className="text-textSecondary">
+            Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in a .env file, then restart the dev
+            server.
+          </p>
+          <div className="mt-6">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                onNavigate('landing');
+              }}
+              className="border-khaki-dark text-khaki-dark"
+            >
+              Back
+            </Button>
+          </div>
         </Card>
       </div>
     );
@@ -172,12 +617,14 @@ export default function OfficerDashboard({ onNavigate }: OfficerDashboardProps) 
         <div className="max-w-7xl mx-auto px-4 flex justify-between items-center">
           <div>
             <h1 className="text-2xl font-bold">Officer Dashboard</h1>
-            <p className="text-khaki-light text-sm">Inspector Sharma (TN001)</p>
+            <p className="text-khaki-light text-sm">
+              {officerProfile?.name} ({officerProfile?.badge_number})
+            </p>
           </div>
           <Button
             variant="secondary"
             onClick={() => {
-              setIsLoggedIn(false);
+              supabase?.auth.signOut();
               onNavigate('landing');
             }}
             className="border-white text-white hover:bg-white hover:text-khaki-dark"

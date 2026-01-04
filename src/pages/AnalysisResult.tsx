@@ -32,12 +32,20 @@ export default function AnalysisResult({
   const [complaint, setComplaint] = useState<Complaint | null>(null);
   const [trackingId, setTrackingId] = useState('');
   const [copied, setCopied] = useState(false);
+  const [submitError, setSubmitError] = useState<string>('');
 
   useEffect(() => {
     analyzeComplaint();
   }, []);
 
   const analyzeComplaint = async () => {
+    if (!supabase) {
+      setSubmitError(
+        'Supabase is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in a .env file, then restart the dev server.'
+      );
+      return;
+    }
+
     const analysis = simulateAIAnalysis(complaintText);
 
     const { data, error } = await supabase
@@ -81,6 +89,8 @@ export default function AnalysisResult({
         status: 'Under Review',
         message: 'Complaint has been received and is being reviewed by our AI system',
       });
+    } else {
+      setSubmitError(error?.message || 'Failed to submit complaint to Supabase.');
     }
   };
 
@@ -193,10 +203,22 @@ This case requires ${severity} priority investigation. ${
   if (!complaint) {
     return (
       <div className="min-h-screen bg-khaki-light flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-16 w-16 border-b-4 border-khaki-dark mx-auto mb-4"></div>
-          <p className="text-textSecondary text-lg">Processing analysis...</p>
-        </div>
+        {submitError ? (
+          <Card className="max-w-xl w-full">
+            <h2 className="text-2xl font-bold text-textPrimary mb-2">Unable to submit</h2>
+            <p className="text-textSecondary">{submitError}</p>
+            <div className="mt-6">
+              <Button variant="secondary" onClick={() => onNavigate('landing')}>
+                Back
+              </Button>
+            </div>
+          </Card>
+        ) : (
+          <div className="text-center">
+            <div className="animate-spin rounded-full h-16 w-16 border-b-4 border-khaki-dark mx-auto mb-4"></div>
+            <p className="text-textSecondary text-lg">Processing analysis...</p>
+          </div>
+        )}
       </div>
     );
   }

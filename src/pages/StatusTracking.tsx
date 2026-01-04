@@ -19,11 +19,25 @@ export default function StatusTracking({ trackingId, onNavigate }: StatusTrackin
 
   useEffect(() => {
     if (trackingId) {
+      if (!supabase) {
+        setError(
+          'Supabase is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in a .env file, then restart the dev server.'
+        );
+        return;
+      }
+
       handleSearch(trackingId);
     }
   }, [trackingId]);
 
   const handleSearch = async (id?: string) => {
+    if (!supabase) {
+      setError(
+        'Supabase is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in a .env file, then restart the dev server.'
+      );
+      return;
+    }
+
     const idToSearch = id || searchId;
     if (!idToSearch) return;
 

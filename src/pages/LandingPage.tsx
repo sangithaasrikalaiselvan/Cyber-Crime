@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import {
   Shield,
   FileText,
@@ -14,6 +15,8 @@ interface LandingPageProps {
 }
 
 export default function LandingPage({ onNavigate }: LandingPageProps) {
+  const [logoError, setLogoError] = useState(false);
+
   const features = [
     {
       icon: FileText,
@@ -53,7 +56,16 @@ export default function LandingPage({ onNavigate }: LandingPageProps) {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="text-center">
             <div className="flex justify-center mb-6">
-              <Shield className="h-20 w-20" />
+              {logoError ? (
+                <Shield className="h-20 w-20" />
+              ) : (
+                <img
+                  src="/logo.png"
+                  alt="Tamil Nadu Police Cyber Crime Wing"
+                  className="h-20 w-20 object-contain"
+                  onError={() => setLogoError(true)}
+                />
+              )}
             </div>
             <h1 className="text-5xl font-bold mb-4">
               Smart NCRP Complaint Intelligence System
@@ -65,7 +77,7 @@ export default function LandingPage({ onNavigate }: LandingPageProps) {
               <Button
                 size="lg"
                 onClick={() => onNavigate('submit')}
-                className="bg-white text-khaki-dark hover:bg-khaki-light"
+                className="bg-priority-high/15 text-priority-high hover:bg-priority-high/20 border-2 border-priority-high"
               >
                 Submit Complaint
               </Button>
